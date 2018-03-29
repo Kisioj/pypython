@@ -2,21 +2,28 @@ import dis, marshal, struct, time, types, binascii
 
 # https://gist.github.com/Kisioj/3f42851d272f25127054a211364a44dd
 
+
+def read_pyc(file):
+    magic = file.read(4)
+    file.read(4)
+    moddate = file.read(4)
+    filesz = file.read(4)  # size of the source file
+    # < is little-endian and size standard (4), without this on 64 bit machine, L's size is 8
+    modtime = time.asctime(time.localtime(struct.unpack('<L', moddate)[0]))
+    filesz = struct.unpack('<L', filesz)
+
+    code = marshal.load(file)
+    return magic, modtime, filesz, code
+
+
 def show_file(fname):
     with open(fname, "rb") as file:
-        magic = file.read(4)
-        file.read(4)
-        moddate = file.read(4)
-        filesz = file.read(4)  # size of the source file
-        modtime = time.asctime(time.localtime(struct.unpack('<L', moddate)[0]))  # < is little-endian and size standard (4), without this on 64 bit machine, L's size is 8
-        filesz = struct.unpack('<L', filesz)
-        print ("magic %s" % (binascii.hexlify(magic)))
-        print ("moddate %s (%s)" % (binascii.hexlify(moddate), modtime))
-        print ("files sz %d" % filesz)
-
-        # code = load_object(FileWrapper(file))
-        code = marshal.load(file)
+        magic, modtime, filesz, code = read_pyc(file)
+        print("magic %s" % binascii.hexlify(magic))
+        print("moddate %s" % modtime)
+        print("files sz %d" % filesz)
         show_code(code)
+
 
 def show_code(code, indent=''):
     # pprint.pprint({x: getattr(code, x) for x in dir(code) if not x.startswith('__')})

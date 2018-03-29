@@ -1,3 +1,13 @@
+
+FLOAT = '<d'  # 8 bytes
+STRING = '<{}s'  # {} bytes
+
+SHORT_INT = '<B'  # 1 byte
+INT = '<l'  # 4 bytes
+LONG_INT = '<q'  # 8 bytes
+
+
+
 MAX_MARSHAL_STACK_DEPTH = 2000
 SIZE32_MAX = 0x7FFFFFFF
 
@@ -52,19 +62,32 @@ class FileWrapper:
     def __repr__(self):
         return '<file %02x - %d>' % (self.offset, self.offset)
 
-    def unpack(self, bytes, as_string=False):
+    def unpack(self, bytes=None, data_type=None):
         result = self.file.read(bytes)
-        if as_string:
-            result = struct.unpack('<{}s'.format(bytes), result)[0]
-        elif bytes == 1:
-            result = ord(struct.unpack('<c', result)[0])
-        elif bytes == 4:
-            # result = struct.unpack('<L', result)[0]
-            result = struct.unpack('<l', result)[0]
-        elif bytes == 8:
-            # result = struct.unpack('<Q', result)[0]
-            result = struct.unpack('<q', result)[0]
+        if bytes is None:
+            if data_type == SHORT_INT:
+                bytes = 1
+            elif data_type == INT:
+                bytes = 4
+            elif data_type in (FLOAT, LONG_INT):
+                bytes = 8
+            elif data_type == STRING:
+                raise AttributeError('bytes argument is required for string data_type')
 
+        elif data_type is None:
+            if bytes == 1:
+                data_type = SHORT_INT
+            elif bytes == 4:
+                data_type = INT
+            elif bytes == 8:
+                data_type = LONG_INT
+            else:
+                data_type = STRING
+
+        if data_type == STRING:
+            data_type = STRING.format(bytes)
+
+        result = struct.unpack(data_type, result)[0]
         self.offset += bytes
         return result
 
@@ -97,7 +120,7 @@ def ref(obj, flag, file):
         file.refs.append(obj)
 
 def read_object(file):
-    type_code = file.unpack(1)
+    type_code = file.unpack(bytes=1, data_type=SHORT_INT)
 
     file.increment_depth()
 
@@ -123,11 +146,11 @@ def read_object(file):
         obj = True
 
     elif obj_type == TYPE_INT:
-        obj = file.unpack(4)
+        obj = file.unpack(bytes=4, data_type=INT)
         ref(obj, flag, file)
 
     elif obj_type == TYPE_INT64:
-        obj = file.unpack(8)
+        obj = file.unpack(bytes=8, data_type=LONG_INT)
         ref(obj, flag, file)  # CHECK
 
     elif obj_type == TYPE_LONG:
@@ -137,7 +160,8 @@ def read_object(file):
         raise NotImplementedError  # CHECK
 
     elif obj_type == TYPE_BINARY_FLOAT:
-        raise NotImplementedError  # CHECK
+        obj = file.unpack(bytes=8, data_type=FLOAT)
+        ref(obj, flag, file)
 
     elif obj_type == TYPE_COMPLEX:
         raise NotImplementedError  # CHECK
@@ -146,8 +170,8 @@ def read_object(file):
         raise NotImplementedError  # CHECK
 
     elif obj_type == TYPE_STRING:
-        length = file.unpack(4)
-        obj = file.unpack(length, as_string=True)
+        length = file.unpack(bytes=4, data_type=INT)
+        obj = file.unpack(bytes=length, data_type=STRING)
         ref(obj, flag, file)
 
     # elif obj_type == TYPE_ASCII_INTERNED:
@@ -165,23 +189,22 @@ def read_object(file):
     elif obj_type == TYPE_SHORT_ASCII_INTERNED:
         is_interned = True
         # TYPE_SHORT_ASCII
-        length = file.unpack(1)
-        obj = file.unpack(length, as_string=True).decode('utf8')
+        length = file.unpack(bytes=1, data_type=SHORT_INT)
+        obj = file.unpack(bytes=length, data_type=STRING).decode('utf8')
         ref(obj, flag, file)
 
     elif obj_type == TYPE_SHORT_ASCII:
-        length = file.unpack(1)
-        obj = file.unpack(length, as_string=True).decode('utf8')
+        length = file.unpack(bytes=1, data_type=SHORT_INT)
+        obj = file.unpack(bytes=length, data_type=STRING).decode('utf8')
         ref(obj, flag, file)
 
     # elif obj_type == TYPE_INTERNED:
     #     raise NotImplementedError  # CHECK
 
     elif obj_type == TYPE_UNICODE:
-        length = file.unpack(4)
+        length = file.unpack(bytes=4, data_type=INT)
         if length != 0:
-            obj = file.unpack(length, as_string=True).decode('utf8')
-            # decode utf8
+            obj = file.unpack(bytes=length, data_type=STRING).decode('utf8')
         else:
             obj = ''
 
@@ -192,7 +215,7 @@ def read_object(file):
         obj = []
         ref(obj, flag, file)
 
-        length = file.unpack(1)  # unsigned
+        length = file.unpack(bytes=1, data_type=SHORT_INT)  # unsigned
         for _ in range(length):
             obj.append(read_object(file))
 
@@ -257,7 +280,7 @@ def read_object(file):
         ref_insert(obj, idx, flag, file)
 
     elif obj_type == TYPE_REF:
-        ref_id = file.unpack(4)  #, as_string=True)
+        ref_id = file.unpack(bytes=4)
         # print ((PyVarObject*)p->refs)->ob_size
         # import binascii
         # print('offset:', hex(file.offset))
@@ -276,9 +299,26 @@ def read_object(file):
 
 
 class Code:
-    def __init__(self, file):
-        # self.idx = 'unique ref counter???' r_ref_reserve, r_ref_insert
+    """
+    https://docs.python.org/3/library/inspect.html
+    co_argcount	number of arguments (not including keyword only arguments, * or ** args)
+    co_code	string of raw compiled bytecode
+    co_cellvars	tuple of names of cell variables (referenced by containing scopes)
+    co_consts	tuple of constants used in the bytecode
+    co_filename	name of file in which this code object was created
+    co_firstlineno	number of first line in Python source code
+    co_flags	bitmap of CO_* flags, read more here
+    co_lnotab	encoded mapping of line numbers to bytecode indices
+    co_freevars	tuple of names of free variables (referenced via a function’s closure)
+    co_kwonlyargcount	number of keyword only arguments (not including ** arg)
+    co_name	name with which this code object was defined
+    co_names	tuple of names of local variables
+    co_nlocals	number of local variables
+    co_stacksize	virtual machine stack space required
+    co_varnames	tuple of names of arguments and local variables
+    """
 
+    def __init__(self, file):
         self.co_argcount = file.unpack(4)
         self.co_kwonlyargcount = file.unpack(4)
         self.co_nlocals = file.unpack(4)
@@ -303,21 +343,29 @@ class Code:
         # return f"""<code object {self.co_name} at {hex(id(self))}, file "{self.co_filename}", line {self.co_firstlineno}>"""
         return """<code object {} at {}, file "{}", line {}>""".format(self.co_name, hex(id(self)), self.co_filename, self.co_firstlineno)
 
+
+def read_pyc(file):
+    magic = file.read(4)
+    file.read(4)
+    moddate = file.read(4)
+    filesz = file.read(4)  # size of the source file
+    # < is little-endian and size standard (4), without this on 64 bit machine, L's size is 8
+    modtime = time.asctime(time.localtime(struct.unpack('<L', moddate)[0]))
+    filesz = struct.unpack('<L', filesz)
+
+    code = read_object(FileWrapper(file))
+    # code = marshal.load(file)
+    return magic, modtime, filesz, code
+
+
 def show_file(fname):
     with open(fname, "rb") as file:
-        magic = file.read(4)
-        file.read(4)
-        moddate = file.read(4)
-        filesz = file.read(4)  # size of the source file
-        modtime = time.asctime(time.localtime(struct.unpack('<L', moddate)[0]))  # < is little-endian and size standard (4), without this on 64 bit machine, L's size is 8
-        filesz = struct.unpack('<L', filesz)
-        print ("magic %s" % (binascii.hexlify(magic)))
-        print ("moddate %s (%s)" % (binascii.hexlify(moddate), modtime))
-        print ("files sz %d" % filesz)
-
-        code = read_object(FileWrapper(file))
-        # code = marshal.load(file)
+        magic, modtime, filesz, code = read_pyc(file)
+        print("magic %s" % binascii.hexlify(magic))
+        print("moddate %s" % modtime)
+        print("files sz %d" % filesz)
         show_code(code)
+
 
 def show_code(code, indent=''):
     print ("%scode" % indent)
